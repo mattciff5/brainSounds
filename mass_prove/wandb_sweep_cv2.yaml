@@ -1,0 +1,80 @@
+program: train.py
+method: grid
+metric:
+  name: eval/best_loss
+  goal: minimize
+
+parameters:
+  data_path:
+    value: /srv/nfs-data/sisko/matteoc/maas_2023/pooled_data.pkl
+  wav_dir:
+    value: /srv/nfs-data/sisko/storage/fMRI_maas_2023/wav
+  sound_names:
+    value: /home/matteoc/brainSounds/maas_data/SoundNames.npy
+  output_dir:
+    value: /home/matteoc/brainSounds/mass_prove/checkpoints/wandb_cv2
+  cv:
+    value: CV2
+  conditioning_mode:
+    value: empty_prompt_ip_adapter
+  average_test_repeats:
+    value: true
+
+  num_epochs:
+    value: 50
+  eval_every:
+    value: 1
+  early_stop_patience:
+    value: 6
+  num_val_audio_samples:
+    value: 2
+  val_num_inference_steps:
+    value: 100
+  save_val_audio_local:
+    value: false
+  batch_size:
+    value: 16
+  grad_accum:
+    value: 4
+  num_workers:
+    value: 4
+  warmup_steps:
+    value: 100
+  seed:
+    value: 42
+
+  lr:
+    values: [1e-5, 5e-5, 1e-4]
+  weight_decay:
+    values: [1e-4, 5e-4, 1e-3]
+  num_decoder_queries:
+    values: [16, 32, 48]
+  dropout:
+    values: [0.1, 0.2, 0.3]
+  min_snr_gamma:
+    values: [2.0, 5.0]
+
+  num_decoder_layers:
+    value: 1
+  nhead:
+    value: 8
+  target_duration_s:
+    value: 1.0
+  target_sr:
+    value: 44100
+  stable_audio_id:
+    value: stabilityai/stable-audio-open-1.0
+
+  wandb_project:
+    value: maas-audio-neuro-adapter
+  wandb_group:
+    value: cv2-empty-prompt-ip-adapter
+  wandb_tags:
+    values:
+      - [cv2, ip_adapter, sweep]
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args}
