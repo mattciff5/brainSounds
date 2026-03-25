@@ -179,6 +179,7 @@ class AudioNeuroDataset(Dataset):
 
         self.num_rois    = roi_data.shape[1]   # 6
         self.max_voxels  = roi_data.shape[2]   # 1024
+        self.brain_normalizer = brain_normalizer
 
     def _load_audio(self, path: str) -> torch.Tensor:
         """
@@ -240,6 +241,7 @@ def build_datasets(
     target_sr: int = 44100,
     target_len_s: float = 4.0,
     average_test_repeats: bool = False,
+    brain_normalizer_override: Optional[BrainNormalizer] = None,
 ) -> tuple:
     """
     Factory function: crea train e test dataset in un colpo solo.
@@ -249,6 +251,8 @@ def build_datasets(
         cv           : chiave cross-validation (es. "CV2")
         wav_dir      : cartella radice dei .wav
         sound_names  : np.ndarray dei nomi dei suoni (SoundNames.npy)
+        brain_normalizer_override : se fornito (es. caricato dal checkpoint),
+                                    viene usato al posto di ricalcolarlo dai dati train.
 
     Returns:
         train_dataset, test_dataset
@@ -262,7 +266,11 @@ def build_datasets(
     test_roi,  test_idx  = load_pooled_data(pooled_data, cv, roi_list, split="test")
     if average_test_repeats:
         test_roi, test_idx = average_roi_data_by_sound(test_roi, test_idx)
-    brain_normalizer = BrainNormalizer.fit(train_roi)
+
+    if brain_normalizer_override is not None:
+        brain_normalizer = brain_normalizer_override
+    else:
+        brain_normalizer = BrainNormalizer.fit(train_roi)
 
     train_ds = AudioNeuroDataset(
         train_roi,

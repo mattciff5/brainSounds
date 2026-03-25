@@ -311,7 +311,7 @@ class TransformerDecoderLayer(nn.Module):
         self.linear2 = nn.Linear(dim_feedforward, d_model)
 
         self.norm1 = nn.LayerNorm(d_model)
-        # self.norm2 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
         self.norm3 = nn.LayerNorm(d_model)
         # self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)

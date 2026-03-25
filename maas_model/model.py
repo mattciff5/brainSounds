@@ -386,7 +386,7 @@ class AudioNeuroAdapter(nn.Module):
         )
         self.brain_prompt_scale = nn.Parameter(torch.tensor(0.1))
         self.register_buffer("_empty_prompt_cache", torch.empty(0), persistent=False)
-        self.ip_adapter_scale = nn.Parameter(torch.tensor(1.0))
+        self.ip_adapter_scale = nn.Parameter(torch.tensor(0.5))
         self.num_ip_tokens = proj_out_len
 
         # ── Backbone frozen ────────────────────────────────────────────────
@@ -399,6 +399,21 @@ class AudioNeuroAdapter(nn.Module):
         self._freeze_backbone()
 
         self.target_duration_s = target_duration_s
+        # Brain normalizer stats — set after construction via set_brain_normalizer()
+        self.register_buffer("_brain_norm_mean", torch.empty(0), persistent=True)
+        self.register_buffer("_brain_norm_std",  torch.empty(0), persistent=True)
+
+    def set_brain_normalizer(self, normalizer):
+        """Store normalizer stats as buffers so they are saved in the checkpoint."""
+        self._brain_norm_mean = normalizer.mean.clone()
+        self._brain_norm_std  = normalizer.std.clone()
+
+    def get_brain_normalizer(self):
+        """Reconstruct a BrainNormalizer from stored buffers, or return None if not set."""
+        from dataset import BrainNormalizer
+        if self._brain_norm_mean.numel() == 0:
+            return None
+        return BrainNormalizer(mean=self._brain_norm_mean.cpu(), std=self._brain_norm_std.cpu())
 
     def _freeze_backbone(self):
         for p in self.pipe.transformer.parameters():
@@ -556,6 +571,48 @@ class AudioNeuroAdapter(nn.Module):
         if self.conditioning_mode == "empty_prompt_ip_adapter":
             encoder_hidden_states = torch.cat([encoder_hidden_states, self.ip_adapter_scale * brain_tokens], dim=1)
 
+        global_hidden_states = torch.cat([seconds_start_hs, seconds_end_hs], dim=2)
+        return encoder_hidden_states, global_hidden_states
+
+    def build_unconditional_conditioning(
+        self,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if dtype is None:
+            dtype = next(self.guidance_generator.parameters()).dtype
+
+        empty_prompt = self._get_empty_prompt_embeds(
+            batch_size=batch_size,
+            device=device,
+            dtype=dtype,
+        )
+
+        if self.conditioning_mode in {"brain_only", "empty_prompt_plus_brain", "empty_prompt_ip_adapter"}:
+            prompt_embeds = empty_prompt
+        else:
+            raise ValueError(f"conditioning_mode non supportata: {self.conditioning_mode}")
+
+        seconds_start_hs, seconds_end_hs = self.pipe.encode_duration(
+            audio_start_in_s=0.0,
+            audio_end_in_s=self.target_duration_s,
+            device=device,
+            do_classifier_free_guidance=False,
+            batch_size=batch_size,
+        )
+
+        encoder_hidden_states = torch.cat([prompt_embeds, seconds_start_hs, seconds_end_hs], dim=1)
+        if self.conditioning_mode == "empty_prompt_ip_adapter":
+            # Zero-pad the IP token slots so the sequence length matches the conditional path,
+            # and the ip_adapter split inside StableAudioIPAttnProcessor2_0 stays consistent.
+            ip_dim = next(self.guidance_generator.parameters()).shape  # dummy; use audio_proj output dim
+            hidden_dim = self.audio_proj.norm.normalized_shape[0]
+            zero_ip = torch.zeros(
+                batch_size, self.num_ip_tokens, hidden_dim,
+                device=device, dtype=dtype,
+            )
+            encoder_hidden_states = torch.cat([encoder_hidden_states, zero_ip], dim=1)
         global_hidden_states = torch.cat([seconds_start_hs, seconds_end_hs], dim=2)
         return encoder_hidden_states, global_hidden_states
 

@@ -67,6 +67,8 @@ def parse_args():
     p.add_argument("--seed",           type=int,   default=42)
     p.add_argument("--min_snr_gamma",  type=float, default=5.0,
                    help="Gamma per Min-SNR weighting. Usa <=0 per disabilitarlo.")
+    p.add_argument("--cfg_dropout_prob", type=float, default=0.05,
+                   help="Probabilità di usare empty prompt al posto del brain conditioning durante il training (CFG dropout). Default 0.05.")
     return p.parse_args()
 
 
@@ -109,25 +111,11 @@ def get_scheduler_sigmas(noise_scheduler, timesteps, n_dim, dtype, device):
 
 
 def sample_training_timesteps(noise_scheduler, batch_size, device):
-    if hasattr(noise_scheduler, "timesteps"):
-        schedule_timesteps = noise_scheduler.timesteps.to(device)
-        indices = torch.randint(
-            low=0,
-            high=len(schedule_timesteps),
-            size=(batch_size,),
-            device=device,
-            dtype=torch.long,
-        )
-        return schedule_timesteps[indices]
-
-    num_train_timesteps = getattr(noise_scheduler.config, "num_train_timesteps", 1000)
-    return torch.randint(
-        low=0,
-        high=num_train_timesteps,
-        size=(batch_size,),
-        device=device,
-        dtype=torch.long,
-    )
+    # noise_scheduler.timesteps must already be set to 1000 steps before the
+    # training loop starts (done once in train()).  We just sample from them.
+    schedule_timesteps = noise_scheduler.timesteps.to(device)
+    indices = torch.randint(0, len(schedule_timesteps), (batch_size,), device=device)
+    return schedule_timesteps[indices]
 
 
 def scale_model_input_for_training(noise_scheduler, noisy_latents, timesteps):
@@ -245,6 +233,9 @@ def train(args):
         target_len_s  = args.target_duration_s,
     )
 
+    # Store brain normalizer stats inside the model so they are saved in the checkpoint.
+    model.set_brain_normalizer(train_ds.brain_normalizer)
+
     train_loader = DataLoader(
         train_ds,
         batch_size  = args.batch_size,
@@ -258,6 +249,9 @@ def train(args):
     scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
 
     # ── 5. Training loop ───────────────────────────────────────────────────
+    # Set the scheduler to 1000 steps once: this gives the correct non-uniform
+    # timestep distribution for EDM/Cosine schedulers during training.
+    noise_scheduler.set_timesteps(1000, device=device)
     global_step = 0
 
     for epoch in range(args.num_epochs):
@@ -270,11 +264,18 @@ def train(args):
         for step, batch in enumerate(pbar):
             brain  = batch["brain_data"].to(device)    # [B, 6, 1024]
             audio  = batch["audio_target"].to(device)  # [B, samples]
+            B = brain.shape[0]
+
+            # CFG conditioning dropout: randomly replace brain signal with empty prompt
+            # so the model learns to denoise unconditionally too (required for CFG at decode).
+            if args.cfg_dropout_prob > 0.0:
+                drop_mask = torch.rand(B) < args.cfg_dropout_prob
+                if drop_mask.any():
+                    brain = brain.clone()
+                    brain[drop_mask] = 0.0  # zeroed brain → guidance_generator maps to near-zero tokens
 
             # a) Encode audio → latenti
             latents = encode_audio_to_latents(vae, audio, device)   # [B, C, T]
-
-            B = latents.shape[0]
 
             timesteps = sample_training_timesteps(
                 noise_scheduler=noise_scheduler,
@@ -328,11 +329,14 @@ def train(args):
                     "cv": args.cv,
                     "conditioning_mode": args.conditioning_mode,
                     "min_snr_gamma": args.min_snr_gamma,
+                    "cfg_dropout_prob": args.cfg_dropout_prob,
                     "train_backbone_cross_attention": args.train_backbone_cross_attention,
                     "train_cross_attention_proj": args.train_cross_attention_proj,
                 },
                 "guidance_generator": model.guidance_generator.state_dict(),
                 "audio_proj":        model.audio_proj.state_dict(),
+                "ip_adapter_scale":  model.ip_adapter_scale.detach().cpu(),
+                "brain_prompt_scale": model.brain_prompt_scale.detach().cpu(),
                 "ip_adapter_modules": model.ip_adapter_modules.state_dict() if model.ip_adapter_modules is not None else None,
                 "trainable_backbone": model.pipe.transformer.state_dict() if args.train_backbone_cross_attention else None,
                 "optimizer":         optimizer.state_dict(),

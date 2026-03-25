@@ -40,12 +40,14 @@ def parse_args():
     p.add_argument("--cv",           type=str, default="CV2")
     p.add_argument("--stable_audio_id", type=str,
                    default="stabilityai/stable-audio-open-1.0")
-    p.add_argument("--num_decoder_queries", type=int, default=128)
-    p.add_argument("--target_duration_s",   type=float, default=4.0)
+    p.add_argument("--num_decoder_queries", type=int, default=16)
+    p.add_argument("--target_duration_s",   type=float, default=1.0)
     p.add_argument("--target_sr",           type=int,   default=44100)
     p.add_argument("--conditioning_mode",   type=str, default="brain_only",
                    choices=["brain_only", "empty_prompt_plus_brain", "empty_prompt_ip_adapter"])
     p.add_argument("--num_inference_steps", type=int,   default=100)
+    p.add_argument("--guidance_scale",      type=float, default=1.0,
+                   help="Classifier-free guidance scale. 1.0 disabilita CFG.")
     p.add_argument("--batch_size",          type=int,   default=1)
     p.add_argument("--average_test_repeats", action="store_true",
                    help="Media i campioni test ripetuti per suono prima della decodifica.")
@@ -92,10 +94,18 @@ def decode(args):
 
     model.guidance_generator.load_state_dict(ckpt["guidance_generator"])
     model.audio_proj.load_state_dict(ckpt["audio_proj"])
+    if ckpt.get("ip_adapter_scale") is not None:
+        model.ip_adapter_scale.data.copy_(ckpt["ip_adapter_scale"].to(device=device, dtype=model.ip_adapter_scale.dtype))
+    if ckpt.get("brain_prompt_scale") is not None:
+        model.brain_prompt_scale.data.copy_(ckpt["brain_prompt_scale"].to(device=device, dtype=model.brain_prompt_scale.dtype))
     if model.ip_adapter_modules is not None and ckpt.get("ip_adapter_modules") is not None:
         model.ip_adapter_modules.load_state_dict(ckpt["ip_adapter_modules"])
     if train_backbone_cross_attention and ckpt.get("trainable_backbone") is not None:
         model.pipe.transformer.load_state_dict(ckpt["trainable_backbone"])
+    # Restore brain normalizer buffers saved during training
+    if ckpt.get("_brain_norm_mean") is not None:
+        model._brain_norm_mean = ckpt["_brain_norm_mean"].to(device)
+        model._brain_norm_std  = ckpt["_brain_norm_std"].to(device)
     model.eval()
     print(f"Checkpoint caricato: {args.ckpt_path}  (epoch {ckpt.get('epoch', '?')})")
 
@@ -103,6 +113,11 @@ def decode(args):
     with open(args.data_path, "rb") as f:
         pooled_data = pickle.load(f)
     sound_names = np.load(args.sound_names, allow_pickle=True)
+
+    # Recover the brain normalizer that was fitted on the training set and
+    # saved inside the model checkpoint.  Fall back to recomputing from data
+    # only if the checkpoint predates this fix (no buffers stored).
+    saved_normalizer = model.get_brain_normalizer()
 
     train_ds, test_ds = build_datasets(
         pooled_data  = pooled_data,
@@ -112,6 +127,7 @@ def decode(args):
         target_sr    = target_sr,
         target_len_s = target_duration_s,
         average_test_repeats = args.average_test_repeats and args.split == "test",
+        brain_normalizer_override = saved_normalizer,
     )
     dataset = test_ds if args.split == "test" else train_ds
     loader  = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
@@ -130,6 +146,14 @@ def decode(args):
             brain_data=brain,
             device=device,
         )
+        uncond_embeds = None
+        uncond_audio_duration_embeds = None
+        if args.guidance_scale != 1.0:
+            uncond_embeds, uncond_audio_duration_embeds = model.build_unconditional_conditioning(
+                batch_size=B,
+                device=device,
+                dtype=text_audio_duration_embeds.dtype,
+            )
 
         # 2) Latenti di partenza
         waveform_length = int(pipe.transformer.config.sample_size)
@@ -153,7 +177,7 @@ def decode(args):
         for i, t in enumerate(scheduler.timesteps):
             latent_input = scheduler.scale_model_input(latents, t)
 
-            noise_pred = model.pipe.transformer(
+            noise_pred_cond = model.pipe.transformer(
                 hidden_states         = latent_input,
                 timestep              = t.unsqueeze(0).expand(B),
                 encoder_hidden_states = text_audio_duration_embeds,
@@ -161,6 +185,19 @@ def decode(args):
                 rotary_embedding      = rotary_embedding,
                 return_dict           = False,
             )[0]
+
+            if args.guidance_scale == 1.0:
+                noise_pred = noise_pred_cond
+            else:
+                noise_pred_uncond = model.pipe.transformer(
+                    hidden_states         = latent_input,
+                    timestep              = t.unsqueeze(0).expand(B),
+                    encoder_hidden_states = uncond_embeds,
+                    global_hidden_states  = uncond_audio_duration_embeds,
+                    rotary_embedding      = rotary_embedding,
+                    return_dict           = False,
+                )[0]
+                noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
             latents = scheduler.step(noise_pred, t, latents).prev_sample
 
