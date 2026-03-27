@@ -211,3 +211,6 @@ __marimo__/
 *.txt
 *.json
 *.wandb
+*.png
+*.gif
+*.csv
