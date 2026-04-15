@@ -156,7 +156,7 @@ def selection_tag(active_mask: torch.Tensor) -> str:
 
 @torch.no_grad()
 def decode(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:6" if torch.cuda.is_available() else "cpu")
     os.makedirs(args.output_dir, exist_ok=True)
 
     keep_rois = parse_roi_list(args.keep_rois)

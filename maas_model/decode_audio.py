@@ -58,7 +58,7 @@ def parse_args():
 
 @torch.no_grad()
 def decode(args):
-    device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:6" if torch.cuda.is_available() else "cpu")
     os.makedirs(args.output_dir, exist_ok=True)
     ckpt = torch.load(args.ckpt_path, map_location=device)
     model_config = ckpt.get("model_config", {})

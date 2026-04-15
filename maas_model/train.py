@@ -189,7 +189,7 @@ def get_loss_weights(noise_scheduler, timesteps, latents, gamma: float):
 
 def train(args):
     torch.manual_seed(args.seed)
-    device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:6" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     os.makedirs(args.output_dir, exist_ok=True)
 
